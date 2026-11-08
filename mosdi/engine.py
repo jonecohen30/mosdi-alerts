@@ -389,7 +389,65 @@ class Engine:
             self.http = http
             self.send(M.system("המערכת עלתה ומתחילה לאסוף נתונים. תיק נייר: 1,000$, 10$ לעסקה."))
             await asyncio.gather(self.tg_sender(), self.sol_price_loop(), self.stream_loop(),
-                                 self.sub_loop(), self.housekeeping_loop())
+                                 self.sub_loop(), self.housekeeping_loop(), self.tg_commands_loop())
+
+    # ------------------------------------------------------------------ פקודות מטלגרם
+    async def tg_commands_loop(self):
+        if not (C.TELEGRAM_TOKEN and C.TELEGRAM_CHAT_ID):
+            return
+        url = f"https://api.telegram.org/bot{C.TELEGRAM_TOKEN}/getUpdates"
+        offset = self.db.get("tg_offset", 0)
+        while True:
+            try:
+                async with self.http.get(url, params={"offset": offset, "timeout": 50},
+                                         timeout=aiohttp.ClientTimeout(total=70)) as r:
+                    data = await r.json()
+                for u in data.get("result", []):
+                    offset = u["update_id"] + 1
+                    msg = u.get("message") or {}
+                    if str(msg.get("chat", {}).get("id")) != str(C.TELEGRAM_CHAT_ID):
+                        continue
+                    text = (msg.get("text") or "").strip().lower()
+                    if text in ("סטטוס", "/status", "status", "מצב"):
+                        self.send(self.status_report(time.time()))
+                self.db.set("tg_offset", offset)
+            except Exception as e:  # noqa: BLE001
+                log.warning("telegram poll error: %s", e)
+                await asyncio.sleep(5)
+
+    def status_report(self, now: float) -> str:
+        q = self.db.conn.execute
+        self.db.flush()
+        hour = now - 3600
+        start = datetime.fromtimestamp(now, ZoneInfo(C.TZ)).replace(hour=0, minute=0, second=0).timestamp()
+        tok_h = q("SELECT COUNT(*) FROM tokens WHERE created_ts>=?", (hour,)).fetchone()[0]
+        trd_h = q("SELECT COUNT(*) FROM trades WHERE ts>=?", (hour,)).fetchone()[0]
+        cps = q("SELECT grade, rejected, COUNT(*) n FROM checkpoints WHERE ts>=? GROUP BY 1,2", (start,)).fetchall()
+        by = {(r["grade"], r["rejected"]): r["n"] for r in cps}
+        reasons = {}
+        for (rs,) in q("SELECT reasons FROM checkpoints WHERE ts>=? AND rejected=1", (start,)).fetchall():
+            for x in json.loads(rs or "[]"):
+                reasons[x] = reasons.get(x, 0) + 1
+        top = sorted(reasons.items(), key=lambda kv: -kv[1])[:4]
+        silent = int(now - self.last_msg_ts)
+        lines = [
+            "<b>סטטוס מערכת</b>",
+            "",
+            f"חיבור לנתונים: {'תקין' if silent < 60 else f'אין נתונים כבר {silent} שניות'}",
+            f"מטבעות במעקב כרגע: {len(self.tokens):,}",
+            f"מטבעות חדשים בשעה האחרונה: {tok_h:,}",
+            f"עסקאות בשעה האחרונה: {trd_h:,}",
+            "",
+            "<b>נקודות בדיקה היום:</b>",
+            f"דרגה א': {by.get(('A', 0), 0)} עברו, {by.get(('A', 1), 0)} נפסלו",
+            f"דרגה ב': {by.get(('B', 0), 0)} עברו, {by.get(('B', 1), 0)} נפסלו",
+            f"דרגה ג': {by.get(('C', 0), 0)} עברו, {by.get(('C', 1), 0)} נפסלו",
+        ]
+        if top:
+            lines += ["", "<b>סיבות פסילה נפוצות היום:</b>"] + [f"• {k}: {v}" for k, v in top]
+        lines += ["", f"עסקאות נייר פתוחות: {len(self.papers)}",
+                  f"יתרה: {M.usd(self.balance + C.STAKE * sum(1 for p in self.papers.values() if p.entry))}"]
+        return M.rtl(lines)
 
 
 def main():

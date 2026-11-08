@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS trades (
     sol REAL, tokens REAL, vsol REAL, mcap_sol REAL, pool TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_trades_mint_ts ON trades(mint, ts);
+CREATE INDEX IF NOT EXISTS ix_trades_ts ON trades(ts);
 
 -- כל מטבע שעבר נקודת בדיקה, גם אם נפסל. מכאן נמדד הדיוק של המסננים
 CREATE TABLE IF NOT EXISTS checkpoints (

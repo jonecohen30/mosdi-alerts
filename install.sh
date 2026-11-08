@@ -36,7 +36,7 @@ ask_token() {
 grep -q '^TELEGRAM_TOKEN=' "$HOME_DIR/.env" 2>/dev/null || ask_token
 
 cd "$HOME_DIR/app"
-while true; do
+while ! grep -q '^TELEGRAM_CHAT_ID=' "$HOME_DIR/.env"; do
   set +e
   MOSDI_HOME="$HOME_DIR" "$HOME_DIR/venv/bin/python" -m mosdi.setup_chat
   rc=$?
@@ -66,7 +66,41 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+# Auto update: every 10 minutes, pull a new version from GitHub if there is one
+cat > "$HOME_DIR/update.sh" <<'UPD'
+#!/usr/bin/env bash
+set -e
+cd /opt/mosdi/app
+git fetch -q origin main
+if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+  git reset -q --hard origin/main
+  /opt/mosdi/venv/bin/pip install -q -r requirements.txt
+  systemctl restart mosdi
+  echo "updated to $(git rev-parse --short HEAD)"
+fi
+UPD
+chmod +x "$HOME_DIR/update.sh"
+
+cat > /etc/systemd/system/mosdi-update.service <<UNIT
+[Unit]
+Description=Mosdi auto update
+[Service]
+Type=oneshot
+ExecStart=$HOME_DIR/update.sh
+UNIT
+
+cat > /etc/systemd/system/mosdi-update.timer <<UNIT
+[Unit]
+Description=Mosdi auto update every 10 minutes
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+[Install]
+WantedBy=timers.target
+UNIT
+
 systemctl daemon-reload
+systemctl enable -q --now mosdi-update.timer
 systemctl enable -q mosdi
 systemctl restart mosdi
 sleep 3
